@@ -54,14 +54,14 @@ async def stop_server_when_no_clients(server):
             await server.wait_closed()  # Ждем, пока сервер полностью остановится
             break
 
-async def read_server_commands():
+async def read_server_commands(loop):
     """
     Асинхронная функция для чтения команд с серверной консоли.
     """
     global stop_server
     while True:
         # Читаем команду с консоли в отдельном потоке, чтобы не блокировать цикл событий
-        cmd = await asyncio.to_thread(input, "")
+        cmd = await loop.run_in_executor(None, input)
         if cmd.strip() == 'stop':
             print("Команда 'stop' получена. Остановка сервера после отключения всех клиентов.")
             stop_server = True  # Устанавливаем флаг остановки сервера
@@ -76,18 +76,29 @@ async def main():
     addrs = ', '.join(str(sock.getsockname()) for sock in server.sockets)
     print(f'Сервер запущен на {addrs}')
 
+    loop = asyncio.get_running_loop()
+
+    # Создаем задачи
+    server_task = loop.create_task(server.serve_forever())
+    command_task = loop.create_task(read_server_commands(loop))
+    stop_task = loop.create_task(stop_server_when_no_clients(server))
+
+    tasks = [server_task, command_task, stop_task]
+
     try:
-        # Запускаем сервер и функции обслуживания команд и остановки сервера параллельно
-        await asyncio.gather(
-            server.serve_forever(),        # Сервер принимает подключения
-            read_server_commands(),        # Читаем команды с консоли
-            stop_server_when_no_clients(server),  # Проверяем условие остановки сервера
-        )
+        # Ждем завершения задач
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        # Здесь мы ловим CancelledError, который возникает при отмене задач
+        pass
     except KeyboardInterrupt:
         # Обрабатываем прерывание по Ctrl+C
         print("Сервер прерван пользователем (Ctrl+C)")
-        server.close()  # Останавливаем сервер
+        server.close()
         await server.wait_closed()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         print("Сервер остановлен")
 
